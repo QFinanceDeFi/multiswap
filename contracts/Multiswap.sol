@@ -5,8 +5,9 @@ pragma solidity 0.8.7;
 import "./interfaces/IUniswapV2Router02.sol";
 import "./libraries/SafeMath.sol";
 import "./libraries/SafeERC20.sol";
+import "./libraries/ReentrancyGuard.sol";
 
-contract Multiswap {
+contract Multiswap is ReentrancyGuard {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -46,9 +47,9 @@ contract Multiswap {
      * These values are the immutable state values for Uniswap and WETH.
      *
     */
-    constructor() {
-        uniswapRouter = IUniswapV2Router02(0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D);
-        WETH = address(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    constructor(address _router, address _weth) {
+        uniswapRouter = IUniswapV2Router02(_router);
+        WETH = _weth;
         
         data.owner = uint160(msg.sender);
         // add extra two digits to percent for accuracy (30 = 0.3)
@@ -63,7 +64,7 @@ contract Multiswap {
     }
     
     /**
-     * @dev Enables receiving ETH with no function call
+     * @dev Enables receiving ETH
     */
     receive() external payable {}
     fallback() external payable {}
@@ -78,7 +79,7 @@ contract Multiswap {
         uint256 _total
     ) external view returns (address[] memory, uint256[] memory, uint256)
     {
-        require(_tokens.length == _percent.length, 'Multiswap: mismatch input data');
+        require(_tokens.length == _percent.length && _percent.length == _slippage.length, 'Multiswap: mismatch input data');
 
         uint256 _totalPercent = 0;
         (uint256 valueToSend, uint256 feeAmount) = applyFeeETH(_total, _tokens.length);
@@ -201,13 +202,12 @@ contract Multiswap {
     function makeETHSwap(address[] memory _tokens, uint256[] memory _percent, uint256[] memory _expected, address _referrer)
         external
         payable
-        returns (uint256[] memory)
+        nonReentrant
     {
         require(address(0) != _referrer, 'Multiswap: referrer cannot be zero addresss');
         require(_tokens.length == _percent.length && _percent.length == _expected.length, 'Multiswap: Input data mismatch');
         (uint256 valueToSend, uint256 feeAmount) = applyFeeETH(msg.value, _tokens.length);
         uint256 totalPercent;
-        uint256[] memory outputs = new uint256[](_tokens.length);
         address[] memory path = new address[](2);
         path[0] = WETH;
 
@@ -218,13 +218,12 @@ contract Multiswap {
             path[1] = _tokens[i];
 
             uint256 swapVal = valueToSend.mul(_percent[i]).div(100);
-            uint256[] memory out = uniswapRouter.swapExactETHForTokens{value: swapVal}(
+            uniswapRouter.swapExactETHForTokensSupportingFeeOnTransferTokens{value: swapVal}(
                 _expected[i],
                 path,
                 msg.sender,
                 block.timestamp + 1200
             );
-            outputs[i] = out[1];
         }
 
         require(totalPercent == 100, 'Multiswap: Percent not 100');
@@ -235,7 +234,6 @@ contract Multiswap {
             require(sent, 'Multiswap: Failed to send referral fee');
         }
         
-        return outputs;
     }
 
     /**
@@ -249,6 +247,7 @@ contract Multiswap {
         address _base,
         uint256 _total)
         external
+        nonReentrant
     {
         require(address(0) != _referrer, 'Multiswap: referrer cannot be zero addresss');
         require(_tokens.length == _percent.length && _percent.length == _expected.length, 'Multiswap: Input data mismatch');
@@ -285,7 +284,7 @@ contract Multiswap {
      * @dev Receive token and handle any logic required for reflection tokens
     */
 
-    function receiveToken(uint256 _amount, address _token, bool toSend) internal returns (uint256 amountReceived) {
+    function receiveToken(uint256 _amount, address _token, bool _toSend) internal returns (uint256 amountReceived) {
         IERC20 token = IERC20(_token);
         uint256 preBalanceToken = token.balanceOf(address(this));
 
@@ -297,7 +296,7 @@ contract Multiswap {
             amountReceived = _amount;
         }
 
-        if (toSend) require(token.approve(address(uniswapRouter), amountReceived), 'Multiswap: Uniswap approval failed');
+        if (_toSend) require(token.approve(address(uniswapRouter), amountReceived), 'Multiswap: Uniswap approval failed');
 
         return amountReceived;
     }
@@ -310,7 +309,7 @@ contract Multiswap {
         uint256[] memory _amounts,
         uint256[] memory _expected,
         address _referrer
-    ) external payable returns (uint256)
+    ) external nonReentrant returns (uint256)
     {
         require(address(0) != _referrer, 'Multiswap: referrer cannot be zero addresss');
         require(_tokens.length == _amounts.length && _expected.length == _expected.length, 'Multiswap: Input data mismatch');
@@ -320,7 +319,7 @@ contract Multiswap {
         
         for (uint i = 0; i < _tokens.length; i++) {
             path[0] = _tokens[i];
-            uint256 totalToSend = receiveToken(_amounts[i], _tokens[i], false);
+            uint256 totalToSend = receiveToken(_amounts[i], _tokens[i], true);
             uniswapRouter.swapExactTokensForETHSupportingFeeOnTransferTokens(totalToSend, _expected[i], path, address(this), block.timestamp + 1200);
         }
 
@@ -454,7 +453,7 @@ contract Multiswap {
     }
     
     /**
-     * @dev Function to see referral balancees
+     * @dev Function to see referral balances
     */
     function getReferralFees(address _referrer) external view returns (uint256) {
         return referralFees[_referrer];
